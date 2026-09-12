@@ -36,9 +36,16 @@ final class DisplayManager {
     }
 
     private var refreshWorkItem: DispatchWorkItem?
+    private var refreshDeadline: TimeInterval?
     private var restoreMonitorWorkItem: DispatchWorkItem?
-    /// 状态切换过渡锁：在执行开启/关闭内建屏后锁定 1.5 秒，避免通道断开/握手期间的回调震荡
-    private var isTransitioning = false
+    private let configurationQueue = DispatchQueue(label: "local.maskmac.display-configuration", qos: .userInitiated)
+    private var isApplying = false
+    private var transition: DisplayTransition?
+    private var recoveryNotBefore: TimeInterval = 0
+    private var terminationReply: ((Bool) -> Void)?
+    private(set) var isPreparingToQuit = false
+    var isTransitioning: Bool { isApplying || transition != nil }
+    private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
     private var lastDisplaySignature = ""
     private var knownExternalDisplayIDs: Set<CGDirectDisplayID>
 
@@ -92,6 +99,7 @@ final class DisplayManager {
     }
 
     func toggleInternalDisplay() {
+        guard !isTransitioning, !isPreparingToQuit else { return }
         if isInternalDisplayOff {
             enableInternalDisplay()
         } else {
@@ -116,6 +124,7 @@ final class DisplayManager {
 
     func enableInternalDisplay(showError: Bool = true) {
         guard let displayID = internalDisplayID else {
+            if isPreparingToQuit { finishTermination(success: false) }
             if showError {
                 presentError("没有找到之前保存的内建显示器 ID。")
             }
@@ -125,91 +134,142 @@ final class DisplayManager {
         apply(enabled: true, displayID: displayID, showError: showError)
     }
 
+    func prepareForTermination(completion: @escaping (Bool) -> Void) {
+        guard !isPreparingToQuit else { return }
+        isPreparingToQuit = true
+        terminationReply = completion
+        NotificationCenter.default.post(name: .displayManagerDidUpdate, object: self)
+        continueTermination()
+    }
+
+    private func continueTermination() {
+        guard isPreparingToQuit, !isApplying else { return }
+        if restoreOnQuit && isInternalDisplayOff {
+            enableInternalDisplay(showError: false)
+        } else if transition == nil || !restoreOnQuit {
+            finishTermination(success: true)
+        }
+    }
+
+    private func finishTermination(success: Bool) {
+        let reply = terminationReply
+        terminationReply = nil
+        isPreparingToQuit = false
+        NotificationCenter.default.post(name: .displayManagerDidUpdate, object: self)
+        reply?(success)
+        if !success { presentError("内建屏幕尚未恢复，已取消退出。请再次尝试关闭 Extend。") }
+    }
+
     private func apply(enabled: Bool, displayID: CGDirectDisplayID, showError: Bool = true) {
+        guard !isApplying else { return }
         guard let configure = PrivateDisplayAPI.configureDisplayEnabled else {
-            if showError {
-                presentError("当前系统找不到显示配置接口。")
-            }
+            if showError { presentError("当前系统找不到显示配置接口。") }
+            if isPreparingToQuit { finishTermination(success: false) }
             return
         }
 
-        isTransitioning = true
+        transition = nil
+        isApplying = true
+        let startedAt = now
+        NotificationCenter.default.post(name: .displayManagerDidUpdate, object: self)
 
-        var configuration: CGDisplayConfigRef?
-        var result = CGBeginDisplayConfiguration(&configuration)
-        if result == .success {
-            result = configure(configuration, displayID, enabled)
-        }
-        if result == .success {
-            result = CGCompleteDisplayConfiguration(
-                configuration,
-                enabled ? .permanently : .forSession
-            )
-        }
-        if result != .success {
-            CGCancelDisplayConfiguration(configuration)
-        }
-
-        NSLog(
-            "MaskMac display=%u enabled=%@ result=%d",
-            displayID,
-            enabled ? "true" : "false",
-            result.rawValue
-        )
-
-        guard result == .success else {
-            isTransitioning = false
-            if showError {
-                presentError("显示配置失败（错误码 \(result.rawValue)）。")
+        // WindowServer 的同步提交可能等待硬件握手；只把事务放到串行队列，AppKit 与状态仍留在主线程。
+        configurationQueue.async { [weak self] in
+            var configuration: CGDisplayConfigRef?
+            var result = CGBeginDisplayConfiguration(&configuration)
+            if result == .success {
+                result = configure(configuration, displayID, enabled)
+                if result == .success {
+                    // 不添加 FadeEffect：本机设置时成功，但会使整笔提交返回 notImplemented (1006)。
+                    result = CGCompleteDisplayConfiguration(configuration, .forSession)
+                } else {
+                    CGCancelDisplayConfiguration(configuration)
+                }
             }
+            let resultCode = result.rawValue
+            let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+            NSLog("MaskMac display=%u enabled=%@ commit=%.3fs result=%d",
+                  displayID, enabled ? "true" : "false", elapsed, resultCode)
+            DispatchQueue.main.async { [weak self] in
+                self?.configurationCompleted(enabled: enabled, resultCode: resultCode, showError: showError)
+            }
+        }
+    }
+
+    private func configurationCompleted(enabled: Bool, resultCode: Int32, showError: Bool) {
+        isApplying = false
+        guard resultCode == CGError.success.rawValue else {
+            if isPreparingToQuit { finishTermination(success: false) }
+            if showError { presentError("显示配置失败（错误码 \(resultCode)）。") }
+            scheduleRefresh(after: 0.1)
             return
         }
 
         isInternalDisplayOff = !enabled
         UserDefaults.standard.set(isInternalDisplayOff, forKey: DefaultsKey.internalDisplayOff)
-        if enabled {
-            stopRestoreMonitor()
-            scheduleRefresh(after: 1.0)
-            refreshMenuBarLayout()
-        } else {
-            startRestoreMonitor()
+        transition = DisplayTransition(enabled: enabled, startedAt: now)
+        // 链路重训保护独立于按钮忙碌状态，拓扑稳定即可交互，无须固定等满四秒。
+        recoveryNotBefore = enabled ? 0 : now + 4.0
+        if enabled { stopRestoreMonitor() } else { startRestoreMonitor() }
+        if isPreparingToQuit && !enabled {
+            continueTermination()
         }
-
-        // 切换后保留 1.5 秒过渡期，在此期间不因系统重协商回调把内屏误判为开启或把外接屏误判为断开
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self else { return }
-            self.isTransitioning = false
-            self.refresh()
-        }
+        refresh()
     }
 
     private func refresh() {
         var activeDisplayCount: UInt32 = 0
-        CGGetActiveDisplayList(0, nil, &activeDisplayCount)
-        var activeDisplays = [CGDirectDisplayID](repeating: 0, count: Int(activeDisplayCount))
-        _ = activeDisplays.withUnsafeMutableBufferPointer { buffer in
-            CGGetActiveDisplayList(activeDisplayCount, buffer.baseAddress, &activeDisplayCount)
+        guard CGGetActiveDisplayList(0, nil, &activeDisplayCount) == .success else {
+            scheduleRefresh(after: 0.1)
+            return
         }
+        var activeDisplays = [CGDirectDisplayID](repeating: 0, count: max(1, Int(activeDisplayCount)))
+        let listResult = activeDisplays.withUnsafeMutableBufferPointer { buffer in
+            CGGetActiveDisplayList(UInt32(buffer.count), buffer.baseAddress, &activeDisplayCount)
+        }
+        guard listResult == .success else {
+            scheduleRefresh(after: 0.1)
+            return
+        }
+        activeDisplays = Array(activeDisplays.prefix(Int(activeDisplayCount)))
 
         let physicalExternalIDs = activeDisplays.filter { CGDisplayIsBuiltin($0) == 0 && isPhysicalExternalDisplay($0) }
         if !physicalExternalIDs.isEmpty {
-            knownExternalDisplayIDs = Set(physicalExternalIDs)
-            persistKnownExternalIDs()
+            let ids = Set(physicalExternalIDs)
+            if ids != knownExternalDisplayIDs {
+                knownExternalDisplayIDs = ids
+                persistKnownExternalIDs()
+            }
         }
 
-        var externalCount = 0
+        let externalCount = physicalExternalIDs.count
         var foundInternalID: CGDirectDisplayID?
         for displayID in activeDisplays {
             if CGDisplayIsBuiltin(displayID) != 0 {
                 foundInternalID = displayID
                 internalDisplayUUID = uuidString(for: displayID)
-            } else if isPhysicalExternalDisplay(displayID) {
-                externalCount += 1
             }
         }
 
         logDisplayTopology(activeDisplays)
-        if let foundInternalID, !isTransitioning {
+        if var pending = transition {
+            let outcome = pending.observe(internalActive: foundInternalID != nil,
+                                          externalIDs: Set(physicalExternalIDs), now: now)
+            transition = outcome == .waiting ? pending : nil
+            if outcome != .waiting {
+                NSLog("MaskMac display settled=%@ afterCommit=%.3fs",
+                      outcome == .settled ? "true" : "false", now - pending.startedAt)
+                if outcome == .timedOut && pending.enabled && foundInternalID == nil {
+                    // 接口成功不等于内屏已恢复；保留恢复入口与拔线兜底，退出也不得提前放行。
+                    isInternalDisplayOff = true
+                    UserDefaults.standard.set(true, forKey: DefaultsKey.internalDisplayOff)
+                }
+                if isPreparingToQuit && pending.enabled {
+                    finishTermination(success: foundInternalID != nil)
+                }
+            }
+        }
+        if let foundInternalID, !isTransitioning, now >= recoveryNotBefore {
             internalDisplayID = foundInternalID
             UserDefaults.standard.set(Int(foundInternalID), forKey: DefaultsKey.internalDisplayID)
             if let internalDisplayUUID {
@@ -223,7 +283,7 @@ final class DisplayManager {
         }
         self.externalDisplayCount = externalCount
 
-        if isInternalDisplayOff && externalCount == 0 && !isTransitioning {
+        if isInternalDisplayOff && externalCount == 0 && !isTransitioning && now >= recoveryNotBefore {
             enableInternalDisplay(showError: false)
             if isInternalDisplayOff {
                 startRestoreMonitor()
@@ -231,6 +291,7 @@ final class DisplayManager {
         } else if isInternalDisplayOff {
             startRestoreMonitor()
         }
+        if transition != nil { scheduleRefresh(after: 0.1) }
         NotificationCenter.default.post(name: .displayManagerDidUpdate, object: self)
     }
 
@@ -252,9 +313,17 @@ final class DisplayManager {
         lastDisplaySignature = signature
     }
 
-    private func scheduleRefresh(after delay: TimeInterval = 0.35) {
+    private func scheduleRefresh(after delay: TimeInterval = 0.1) {
+        // 合并事件而不反复向后推迟，避免连续回调使刷新一直无法执行。
+        let deadline = now + delay
+        if let refreshDeadline, refreshDeadline <= deadline { return }
         refreshWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.refresh() }
+        refreshDeadline = deadline
+        let item = DispatchWorkItem { [weak self] in
+            self?.refreshWorkItem = nil
+            self?.refreshDeadline = nil
+            self?.refresh()
+        }
         refreshWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
@@ -282,6 +351,9 @@ final class DisplayManager {
     /// 判定是否为真实存在的物理外接显示器
     /// 排除虚拟屏幕、AirPlay 占位符以及系统在分辨率/HDR重协商瞬间生成的临时无物理尺寸占位符
     private func isPhysicalExternalDisplay(_ displayID: CGDirectDisplayID) -> Bool {
+        if knownExternalDisplayIDs.contains(displayID) {
+            return true
+        }
         let size = CGDisplayScreenSize(displayID)
         let hasPhysicalSize = size.width >= 10 && size.height >= 10
         let vendor = CGDisplayVendorNumber(displayID)
@@ -298,19 +370,7 @@ final class DisplayManager {
         }
         let removalFlags: CGDisplayChangeSummaryFlags = [.removeFlag, .disabledFlag]
         if !flags.intersection(removalFlags).isEmpty || isInternalDisplayOff {
-            scheduleRefresh(after: 0.2)
-        }
-    }
-
-    /// 刷新顶部菜单栏布局
-    /// 在 macOS Sequoia 下重新点亮内屏或变更主显示器后，ControlCenter 托盘图标易出现重叠错位，
-    /// 通过触发 ControlCenter 进程重启，重置菜单栏布局。
-    private func refreshMenuBarLayout() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-            task.arguments = ["ControlCenter"]
-            try? task.run()
+            scheduleRefresh(after: 0.1)
         }
     }
 

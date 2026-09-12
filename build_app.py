@@ -82,8 +82,19 @@ def main() -> None:
         plistlib.dump(info, plist_file, sort_keys=False)
 
     print("[5/6] 执行本地签名")
+    bundle_id = app_config.get("bundle_identifier", "local.maskmac.app")
     subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", app_config.get("sign_identity", "-"), str(app_path)],
+        [
+            "codesign",
+            "--force",
+            "--deep",
+            "--sign",
+            app_config.get("sign_identity", "-"),
+            "--identifier",
+            bundle_id,
+            f"-r=designated => identifier \"{bundle_id}\"",
+            str(app_path),
+        ],
         check=True,
     )
 

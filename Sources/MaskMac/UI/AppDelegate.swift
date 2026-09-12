@@ -3,15 +3,21 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displayManager = DisplayManager()
+    private let duoPreferences = DuoPreferences.shared
+    private lazy var lidController = LidController(preferences: duoPreferences)
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
+    private let extendItem = NSMenuItem(title: "Extend", action: #selector(toggleDisplay), keyEquivalent: "d")
+    private let duoItem = NSMenuItem(title: "Duo", action: #selector(toggleDuoEffect), keyEquivalent: "")
+    private let exitItem = NSMenuItem(title: "Exit", action: #selector(quitApp), keyEquivalent: "q")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        ProcessInfo.processInfo.disableAutomaticTermination("正在监测外接显示器断开")
+        ProcessInfo.processInfo.disableAutomaticTermination("正在监测外接显示器与开合传感器")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureStatusItem()
+        lidController.start()
         rebuildMenu()
         NotificationCenter.default.addObserver(
             self,
@@ -21,10 +27,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        if displayManager.restoreOnQuit {
-            displayManager.enableInternalDisplay(showError: false)
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // 退出也走同一个串行事务，避免后台正在关屏时进程先退出。
+        DispatchQueue.main.async { [weak self] in
+            self?.displayManager.prepareForTermination { success in
+                sender.reply(toApplicationShouldTerminate: success)
+            }
         }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        lidController.stop()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -33,46 +47,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleDisplay() {
-        displayManager.toggleInternalDisplay()
-        rebuildMenu()
+        menu.cancelTracking()
+        DispatchQueue.main.async { [weak self] in
+            self?.displayManager.toggleInternalDisplay()
+        }
     }
 
-    @objc private func showSettings() {
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "显示器设置"
-        alert.informativeText = "点击“只保留外接显示器”后，系统将彻底注销内建屏幕通道，所有桌面窗口与内容会自动合并到外接显示器；拔掉外接屏幕时会自动恢复内屏。"
-
-        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 62))
-
-        let statusLabel = NSTextField(
-            labelWithString: "当前状态：\(displayManager.isInternalDisplayOff ? "内建显示器已关闭" : "内建显示器已开启") · 外接显示器：\(displayManager.externalDisplayCount) 台"
-        )
-        statusLabel.frame = NSRect(x: 0, y: 36, width: 380, height: 22)
-        accessoryView.addSubview(statusLabel)
-
-        let restoreOnQuit = NSButton(
-            checkboxWithTitle: "退出应用时恢复内建显示器（推荐）",
-            target: nil,
-            action: nil
-        )
-        restoreOnQuit.frame = NSRect(x: 0, y: 6, width: 380, height: 24)
-        restoreOnQuit.state = displayManager.restoreOnQuit ? .on : .off
-        accessoryView.addSubview(restoreOnQuit)
-
-        alert.accessoryView = accessoryView
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        displayManager.restoreOnQuit = restoreOnQuit.state == .on
+    @objc private func toggleDuoEffect() {
+        duoPreferences.isEnabled.toggle()
+        if duoPreferences.isEnabled {
+            if !CGPreflightScreenCaptureAccess() {
+                CGRequestScreenCaptureAccess()
+            }
+        }
         rebuildMenu()
     }
 
     @objc private func quitApp() {
-        if displayManager.restoreOnQuit {
-            displayManager.enableInternalDisplay(showError: false)
-        }
+        menu.cancelTracking()
         NSApp.terminate(nil)
     }
 
@@ -92,25 +84,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildMenu() {
-        menu.autoenablesItems = false
-        menu.removeAllItems()
+        if menu.items.isEmpty {
+            menu.autoenablesItems = false
+            for item in [extendItem, duoItem, exitItem] { item.target = self }
+            menu.addItem(extendItem)
+            menu.addItem(.separator())
+            menu.addItem(duoItem)
+            menu.addItem(.separator())
+            menu.addItem(exitItem)
+            statusItem.menu = menu
+        }
 
-        let toggleTitle = displayManager.isInternalDisplayOff ? "恢复内建显示器" : "只保留外接显示器"
-        let toggle = NSMenuItem(title: toggleTitle, action: #selector(toggleDisplay), keyEquivalent: "d")
-        toggle.target = self
-        toggle.isEnabled = displayManager.isInternalDisplayOff
+        let busy = displayManager.isTransitioning
+        extendItem.title = busy ? "Extend…" : "Extend"
+        extendItem.state = busy ? .mixed : (displayManager.isInternalDisplayOff ? .on : .off)
+        extendItem.isEnabled = !busy && !displayManager.isPreparingToQuit && (displayManager.isInternalDisplayOff
             ? displayManager.internalDisplayID != nil
-            : displayManager.externalDisplayCount > 0
-        menu.addItem(toggle)
-
-        let settings = NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ",")
-        settings.target = self
-        menu.addItem(settings)
-
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 MaskMac", action: #selector(quitApp), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-        statusItem.menu = menu
+            : displayManager.externalDisplayCount > 0)
+        statusItem.button?.toolTip = busy ? "MaskMac — 正在切换显示器" : "MaskMac"
+        duoItem.state = duoPreferences.isEnabled ? .on : .off
+        duoItem.isEnabled = lidController.isSensorAvailable
+        duoItem.title = lidController.isSensorAvailable ? "Duo" : "Duo (No Sensor)"
+        exitItem.isEnabled = !displayManager.isPreparingToQuit
     }
 }
