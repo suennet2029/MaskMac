@@ -5,14 +5,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displayManager = DisplayManager()
     private let duoPreferences = DuoPreferences.shared
     private lazy var lidController = LidController(preferences: duoPreferences)
-    private let blinkManager = BlinkManager.shared
+    private let auraManager = AuraManager.shared
 
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private let extendItem = NSMenuItem(title: "Extend", action: #selector(toggleDisplay), keyEquivalent: "d")
     private let duoItem = NSMenuItem(title: "Duo", action: #selector(toggleDuoEffect), keyEquivalent: "")
     private let brightnessItem = NSMenuItem(title: "Brightness", action: #selector(toggleBrightness), keyEquivalent: "b")
-    private let blinkItem = NSMenuItem(title: "Blink", action: #selector(toggleBlink), keyEquivalent: "")
+    private let auraItem = NSMenuItem(title: "Aura", action: #selector(toggleAura), keyEquivalent: "")
     private let exitItem = NSMenuItem(title: "Exit", action: #selector(quitApp), keyEquivalent: "q")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(rebuildMenuNotification),
-            name: .blinkStateDidUpdate,
+            name: .auraStateDidUpdate,
             object: nil
         )
 
@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        blinkManager.stopMonitoring()
+        auraManager.stopMonitoring()
         BrightnessPanelWindow.shared.hide()
         DispatchQueue.main.async { [weak self] in
             self?.displayManager.prepareForTermination { success in
@@ -52,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        blinkManager.stopMonitoring()
+        auraManager.stopMonitoring()
         BrightnessPanelWindow.shared.hide()
         lidController.stop()
         NotificationCenter.default.removeObserver(self)
@@ -60,8 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleCommandLineArguments() {
         let args = CommandLine.arguments
-        if args.contains("--blink-test") {
-            blinkManager.startSimulation(duration: 5.0)
+        if args.contains("--aura-test") {
+            auraManager.startSimulation(duration: 5.0)
         } else if args.contains("--brightness") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 self?.toggleBrightness()
@@ -98,8 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleBlink() {
-        blinkManager.toggle()
+    @objc private func toggleAura() {
+        auraManager.toggle()
         rebuildMenu()
     }
 
@@ -126,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         if menu.items.isEmpty {
             menu.autoenablesItems = false
-            for item in [extendItem, duoItem, brightnessItem, blinkItem, exitItem] {
+            for item in [extendItem, duoItem, brightnessItem, auraItem, exitItem] {
                 item.target = self
             }
             menu.addItem(extendItem)
@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(duoItem)
             menu.addItem(.separator())
             menu.addItem(brightnessItem)
-            menu.addItem(blinkItem)
+            menu.addItem(auraItem)
             menu.addItem(.separator())
             menu.addItem(exitItem)
             statusItem.menu = menu
@@ -151,17 +151,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         duoItem.isEnabled = lidController.isSensorAvailable
         duoItem.title = lidController.isSensorAvailable ? "Duo" : "Duo (No Sensor)"
 
-        blinkItem.state = blinkManager.isEnabled ? .on : .off
-        if let agent = blinkManager.currentAgent {
-            blinkItem.title = "Blink (\(agent))"
+        auraItem.state = auraManager.isEnabled ? .on : .off
+        if let agent = auraManager.currentAgent {
+            auraItem.title = "Aura (\(agent))"
         } else {
-            blinkItem.title = "Blink"
+            auraItem.title = "Aura"
         }
 
         if busy {
             statusItem.button?.toolTip = "MaskMac — 正在切换显示器"
-        } else if blinkManager.isBlinking {
-            statusItem.button?.toolTip = "MaskMac — \(blinkManager.currentAgent ?? "Agent") 运行中 (中/英灯闪烁)"
+        } else if auraManager.isActive {
+            statusItem.button?.toolTip = "MaskMac — \(auraManager.currentAgent ?? "Agent") 运行中 (顶部跑马灯 & 键盘呼吸)"
         } else {
             statusItem.button?.toolTip = "MaskMac"
         }

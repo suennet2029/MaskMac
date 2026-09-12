@@ -6,6 +6,7 @@ final class BrightnessPanelWindow: NSPanel {
     static let shared = BrightnessPanelWindow()
 
     private var localMouseDownMonitor: Any?
+    private var globalMouseDownMonitor: Any?
 
     private init() {
         let contentRect = NSRect(x: 0, y: 0, width: 250, height: 95)
@@ -40,29 +41,44 @@ final class BrightnessPanelWindow: NSPanel {
         let panelWidth: CGFloat = 250
         let panelHeight: CGFloat = 95
 
-        // 核心：严格计算在状态栏下方，留出 6pt 呼吸空隙，绝不遮挡顶部菜单栏按钮
+        // 严格计算在状态栏下方留出 6pt 空隙，不遮挡任何菜单栏按钮
         let y = buttonFrame.minY - panelHeight - 6
 
-        // 水平居中对齐图标，并限制在屏幕可视区域内
         var x = buttonFrame.midX - panelWidth / 2
         let minX = screen.visibleFrame.minX + 8
         let maxX = screen.visibleFrame.maxX - panelWidth - 8
         x = max(minX, min(x, maxX))
 
         self.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
+        self.alphaValue = 0
         self.orderFront(nil)
 
-        // 监听点击外部自动关闭
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            self.animator().alphaValue = 1.0
+        }
+
         startOutsideClickMonitor()
     }
 
     func hide() {
+        guard self.isVisible else { return }
         stopOutsideClickMonitor()
-        self.orderOut(nil)
+
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            self.animator().alphaValue = 0.0
+        }, completionHandler: { [weak self] in
+            DispatchQueue.main.async {
+                self?.orderOut(nil)
+            }
+        })
     }
 
     private func startOutsideClickMonitor() {
         stopOutsideClickMonitor()
+
+        // 1. 本应用内点击外部
         localMouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, self.isVisible else { return event }
             let clickLocation = NSEvent.mouseLocation
@@ -71,12 +87,27 @@ final class BrightnessPanelWindow: NSPanel {
             }
             return event
         }
+
+        // 2. 核心修复：全局点击外部（点击桌面、终端、浏览器、其他任意 App 立即关闭浮窗）
+        globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isVisible else { return }
+                let clickLocation = NSEvent.mouseLocation
+                if !self.frame.contains(clickLocation) {
+                    self.hide()
+                }
+            }
+        }
     }
 
     private func stopOutsideClickMonitor() {
         if let monitor = localMouseDownMonitor {
             NSEvent.removeMonitor(monitor)
             localMouseDownMonitor = nil
+        }
+        if let monitor = globalMouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseDownMonitor = nil
         }
     }
 }

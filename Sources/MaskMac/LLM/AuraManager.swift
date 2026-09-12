@@ -2,11 +2,11 @@ import Foundation
 import AppKit
 
 @MainActor
-final class BlinkManager {
-    static let shared = BlinkManager()
+final class AuraManager {
+    static let shared = AuraManager()
 
     private enum DefaultsKey {
-        static let isEnabled = "BlinkEnabled"
+        static let isEnabled = "AuraEnabled"
     }
 
     private var pollTimer: Timer?
@@ -16,8 +16,8 @@ final class BlinkManager {
 
     private(set) var currentAgent: String?
 
-    var isBlinking: Bool {
-        KeyboardLEDManager.shared.isBlinking
+    var isActive: Bool {
+        autoActive || isSimulating
     }
 
     var isEnabled: Bool {
@@ -28,7 +28,7 @@ final class BlinkManager {
             } else {
                 stopMonitoring()
             }
-            NotificationCenter.default.post(name: .blinkStateDidUpdate, object: self)
+            NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
         }
     }
 
@@ -45,7 +45,6 @@ final class BlinkManager {
 
     func startMonitoring() {
         pollTimer?.invalidate()
-        // 启动时立即扫描一次
         scanProcesses()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -62,29 +61,32 @@ final class BlinkManager {
         isSimulating = false
         autoActive = false
         currentAgent = nil
-        KeyboardLEDManager.shared.stopBlinking()
+        TopRunnerWindow.shared.hide()
+        KeyboardBrightnessManager.shared.stopBreathing()
     }
 
-    /// 模拟测试 5 秒闪烁
+    /// 模拟测试 5 秒（顶部激光跑马灯 + 键盘背光呼吸）
     func startSimulation(duration: TimeInterval = 5.0) {
         simulationTimer?.invalidate()
         isSimulating = true
         currentAgent = "Test"
-        KeyboardLEDManager.shared.startBlinking(interval: 0.35)
-        NotificationCenter.default.post(name: .blinkStateDidUpdate, object: self)
+        TopRunnerWindow.shared.show()
+        KeyboardBrightnessManager.shared.startBreathing()
+        NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
 
         simulationTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.isSimulating else { return }
                 self.isSimulating = false
                 self.currentAgent = nil
-                KeyboardLEDManager.shared.stopBlinking()
-                NotificationCenter.default.post(name: .blinkStateDidUpdate, object: self)
+                TopRunnerWindow.shared.hide()
+                KeyboardBrightnessManager.shared.stopBreathing()
+                NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
             }
         }
     }
 
-    /// 检测本地 Claude Code、CodeX 和 antiGravity 运行状态
+    /// 扫描检测本地运行的 Claude Code、CodeX 与 antiGravity 进程
     private func scanProcesses() {
         guard !isSimulating, isEnabled else { return }
 
@@ -120,7 +122,7 @@ final class BlinkManager {
                     agentName = "CodeX"
                     break
                 }
-                // 3. antiGravity (包括 Antigravity.app、language_server 以及 agy CLI)
+                // 3. antiGravity (包含 Antigravity.app、language_server 以及 agy CLI)
                 if lower.contains("antigravity") || lower.contains("/agy") || lower.hasPrefix("agy ") {
                     detected = true
                     agentName = "antiGravity"
@@ -131,13 +133,15 @@ final class BlinkManager {
             if detected && !autoActive {
                 autoActive = true
                 currentAgent = agentName
-                KeyboardLEDManager.shared.startBlinking(interval: 0.35)
-                NotificationCenter.default.post(name: .blinkStateDidUpdate, object: self)
+                TopRunnerWindow.shared.show()
+                KeyboardBrightnessManager.shared.startBreathing()
+                NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
             } else if !detected && autoActive {
                 autoActive = false
                 currentAgent = nil
-                KeyboardLEDManager.shared.stopBlinking()
-                NotificationCenter.default.post(name: .blinkStateDidUpdate, object: self)
+                TopRunnerWindow.shared.hide()
+                KeyboardBrightnessManager.shared.stopBreathing()
+                NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
             }
         } catch {
         }
