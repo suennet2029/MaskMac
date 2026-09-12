@@ -61,7 +61,7 @@ final class AuraManager {
         isSimulating = false
         autoActive = false
         currentAgent = nil
-        TopRunnerWindow.shared.hide()
+        ScreenAuraWindow.shared.hide()
         KeyboardBrightnessManager.shared.stopBreathing()
     }
 
@@ -70,7 +70,7 @@ final class AuraManager {
         simulationTimer?.invalidate()
         isSimulating = true
         currentAgent = "Test"
-        TopRunnerWindow.shared.show()
+        ScreenAuraWindow.shared.show()
         KeyboardBrightnessManager.shared.startBreathing()
         NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
 
@@ -79,7 +79,7 @@ final class AuraManager {
                 guard let self, self.isSimulating else { return }
                 self.isSimulating = false
                 self.currentAgent = nil
-                TopRunnerWindow.shared.hide()
+                ScreenAuraWindow.shared.hide()
                 KeyboardBrightnessManager.shared.stopBreathing()
                 NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
             }
@@ -94,7 +94,7 @@ final class AuraManager {
             if !autoActive || currentAgent != activeAgent {
                 autoActive = true
                 currentAgent = activeAgent
-                TopRunnerWindow.shared.show()
+                ScreenAuraWindow.shared.show()
                 KeyboardBrightnessManager.shared.startBreathing()
                 NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
             }
@@ -102,7 +102,7 @@ final class AuraManager {
             if autoActive {
                 autoActive = false
                 currentAgent = nil
-                TopRunnerWindow.shared.hide()
+                ScreenAuraWindow.shared.hide()
                 KeyboardBrightnessManager.shared.stopBreathing()
                 NotificationCenter.default.post(name: .auraStateDidUpdate, object: self)
             }
