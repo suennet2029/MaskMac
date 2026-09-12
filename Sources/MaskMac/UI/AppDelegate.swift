@@ -41,13 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "显示器设置"
-        alert.informativeText = "应用采用手动模式：连接外接显示器后，请从菜单手动关闭内建显示器；拔线时应用会自动恢复内屏。"
+        alert.informativeText = "点击“只保留外接显示器”后，系统将彻底注销内建屏幕通道，所有桌面窗口与内容会自动合并到外接显示器；拔掉外接屏幕时会自动恢复内屏。"
 
-        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 62))
+        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 62))
+
         let statusLabel = NSTextField(
             labelWithString: "当前状态：\(displayManager.isInternalDisplayOff ? "内建显示器已关闭" : "内建显示器已开启") · 外接显示器：\(displayManager.externalDisplayCount) 台"
         )
-        statusLabel.frame = NSRect(x: 0, y: 36, width: 360, height: 22)
+        statusLabel.frame = NSRect(x: 0, y: 36, width: 380, height: 22)
         accessoryView.addSubview(statusLabel)
 
         let restoreOnQuit = NSButton(
@@ -55,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             target: nil,
             action: nil
         )
-        restoreOnQuit.frame = NSRect(x: 0, y: 6, width: 360, height: 24)
+        restoreOnQuit.frame = NSRect(x: 0, y: 6, width: 380, height: 24)
         restoreOnQuit.state = displayManager.restoreOnQuit ? .on : .off
         accessoryView.addSubview(restoreOnQuit)
 
@@ -91,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildMenu() {
+        menu.autoenablesItems = false
         menu.removeAllItems()
 
         let toggleTitle = displayManager.isInternalDisplayOff ? "恢复内建显示器" : "只保留外接显示器"

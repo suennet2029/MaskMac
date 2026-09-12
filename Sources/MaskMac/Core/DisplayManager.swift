@@ -37,14 +37,21 @@ final class DisplayManager {
 
     private var refreshWorkItem: DispatchWorkItem?
     private var restoreMonitorWorkItem: DispatchWorkItem?
+    /// 状态切换过渡锁：在执行开启/关闭内建屏后锁定 1.5 秒，避免通道断开/握手期间的回调震荡
+    private var isTransitioning = false
     private var lastDisplaySignature = ""
     private var knownExternalDisplayIDs: Set<CGDirectDisplayID>
 
     init() {
         let defaults = UserDefaults.standard
-        // 清理旧版本自动切换配置，避免遗留偏好继续影响用户判断。
         defaults.removeObject(forKey: "AutoDisableWithExternal")
         defaults.removeObject(forKey: "AutoDisableDelay")
+        defaults.removeObject(forKey: "MaskMode")
+        defaults.removeObject(forKey: "ActiveOffMode")
+        defaults.removeObject(forKey: "SavedBrightness")
+        defaults.removeObject(forKey: "SavedInternalOriginX")
+        defaults.removeObject(forKey: "SavedInternalOriginY")
+
         if let storedID = defaults.object(forKey: DefaultsKey.internalDisplayID) as? Int {
             internalDisplayID = CGDirectDisplayID(storedID)
         } else if let storedID = defaults.object(forKey: DefaultsKey.internalDisplayID) as? UInt32 {
@@ -103,6 +110,7 @@ final class DisplayManager {
             return
         }
         guard !isInternalDisplayOff else { return }
+
         apply(enabled: false, displayID: displayID)
     }
 
@@ -124,6 +132,8 @@ final class DisplayManager {
             }
             return
         }
+
+        isTransitioning = true
 
         var configuration: CGDisplayConfigRef?
         var result = CGBeginDisplayConfiguration(&configuration)
@@ -148,6 +158,7 @@ final class DisplayManager {
         )
 
         guard result == .success else {
+            isTransitioning = false
             if showError {
                 presentError("显示配置失败（错误码 \(result.rawValue)）。")
             }
@@ -159,8 +170,16 @@ final class DisplayManager {
         if enabled {
             stopRestoreMonitor()
             scheduleRefresh(after: 1.0)
+            refreshMenuBarLayout()
         } else {
             startRestoreMonitor()
+        }
+
+        // 切换后保留 1.5 秒过渡期，在此期间不因系统重协商回调把内屏误判为开启或把外接屏误判为断开
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.isTransitioning = false
+            self.refresh()
         }
     }
 
@@ -172,13 +191,10 @@ final class DisplayManager {
             CGGetActiveDisplayList(activeDisplayCount, buffer.baseAddress, &activeDisplayCount)
         }
 
-        let activeExternalDisplayIDs = activeDisplays.filter { CGDisplayIsBuiltin($0) == 0 }
-        if !isInternalDisplayOff || knownExternalDisplayIDs.isEmpty {
-            let physicalExternalIDs = activeExternalDisplayIDs.filter(isPhysicalExternalDisplay)
-            if !physicalExternalIDs.isEmpty {
-                knownExternalDisplayIDs = Set(physicalExternalIDs)
-                persistKnownExternalIDs()
-            }
+        let physicalExternalIDs = activeDisplays.filter { CGDisplayIsBuiltin($0) == 0 && isPhysicalExternalDisplay($0) }
+        if !physicalExternalIDs.isEmpty {
+            knownExternalDisplayIDs = Set(physicalExternalIDs)
+            persistKnownExternalIDs()
         }
 
         var externalCount = 0
@@ -187,13 +203,13 @@ final class DisplayManager {
             if CGDisplayIsBuiltin(displayID) != 0 {
                 foundInternalID = displayID
                 internalDisplayUUID = uuidString(for: displayID)
-            } else if knownExternalDisplayIDs.contains(displayID), isPhysicalExternalDisplay(displayID) {
+            } else if isPhysicalExternalDisplay(displayID) {
                 externalCount += 1
             }
         }
 
         logDisplayTopology(activeDisplays)
-        if let foundInternalID {
+        if let foundInternalID, !isTransitioning {
             internalDisplayID = foundInternalID
             UserDefaults.standard.set(Int(foundInternalID), forKey: DefaultsKey.internalDisplayID)
             if let internalDisplayUUID {
@@ -207,7 +223,7 @@ final class DisplayManager {
         }
         self.externalDisplayCount = externalCount
 
-        if isInternalDisplayOff && externalCount == 0 {
+        if isInternalDisplayOff && externalCount == 0 && !isTransitioning {
             enableInternalDisplay(showError: false)
             if isInternalDisplayOff {
                 startRestoreMonitor()
@@ -255,7 +271,7 @@ final class DisplayManager {
             }
         }
         restoreMonitorWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: item)
     }
 
     private func stopRestoreMonitor() {
@@ -263,17 +279,38 @@ final class DisplayManager {
         restoreMonitorWorkItem = nil
     }
 
+    /// 判定是否为真实存在的物理外接显示器
+    /// 排除虚拟屏幕、AirPlay 占位符以及系统在分辨率/HDR重协商瞬间生成的临时无物理尺寸占位符
     private func isPhysicalExternalDisplay(_ displayID: CGDirectDisplayID) -> Bool {
         let size = CGDisplayScreenSize(displayID)
         let hasPhysicalSize = size.width >= 10 && size.height >= 10
-        let hasHardwareIdentity = CGDisplayVendorNumber(displayID) != 0 || CGDisplayModelNumber(displayID) != 0
+        let vendor = CGDisplayVendorNumber(displayID)
+        let model = CGDisplayModelNumber(displayID)
+        // 过滤系统在显示重协商阶段生成的临时占位（如 vendor="unkn", model="virt"）
+        let isVirtual = (vendor == 0x756e6b6e && model == 0x76697274)
+        let hasHardwareIdentity = (vendor != 0 || model != 0) && !isVirtual
         return hasPhysicalSize && hasHardwareIdentity
     }
 
     func handleDisplayReconfiguration(flags: CGDisplayChangeSummaryFlags) {
+        if flags.contains(.beginConfigurationFlag) {
+            return
+        }
         let removalFlags: CGDisplayChangeSummaryFlags = [.removeFlag, .disabledFlag]
         if !flags.intersection(removalFlags).isEmpty || isInternalDisplayOff {
-            refresh()
+            scheduleRefresh(after: 0.2)
+        }
+    }
+
+    /// 刷新顶部菜单栏布局
+    /// 在 macOS Sequoia 下重新点亮内屏或变更主显示器后，ControlCenter 托盘图标易出现重叠错位，
+    /// 通过触发 ControlCenter 进程重启，重置菜单栏布局。
+    private func refreshMenuBarLayout() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            task.arguments = ["ControlCenter"]
+            try? task.run()
         }
     }
 
