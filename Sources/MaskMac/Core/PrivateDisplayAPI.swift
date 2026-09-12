@@ -76,4 +76,17 @@ enum PrivateDisplayAPI {
         let clamped = max(0.0, min(1.0, brightness))
         return fn(displayID, clamped) == 0
     }
+
+    /// 获取主显示器或内建显示器的当前亮度
+    static func getCurrentDisplayBrightness(displayID: CGDirectDisplayID? = nil) -> Float {
+        let targetID = displayID ?? CGMainDisplayID()
+        return getBrightness(for: targetID) ?? 0.5
+    }
+
+    /// 设置主显示器或内建显示器的当前亮度
+    @discardableResult
+    static func setCurrentDisplayBrightness(_ brightness: Float, displayID: CGDirectDisplayID? = nil) -> Bool {
+        let targetID = displayID ?? CGMainDisplayID()
+        return setBrightness(for: targetID, brightness: brightness)
+    }
 }

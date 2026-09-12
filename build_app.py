@@ -77,6 +77,13 @@ def main() -> None:
         "CFBundleVersion": version,
         "LSMinimumSystemVersion": app_config.get("minimum_macos", "13.0"),
         "LSUIElement": True,
+        "CFBundleURLTypes": [
+            {
+                "CFBundleTypeRole": "Viewer",
+                "CFBundleURLName": "local.maskmac.url",
+                "CFBundleURLSchemes": ["maskmac"]
+            }
+        ],
     }
     with (app_path / "Contents" / "Info.plist").open("wb") as plist_file:
         plistlib.dump(info, plist_file, sort_keys=False)

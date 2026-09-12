@@ -5,30 +5,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displayManager = DisplayManager()
     private let duoPreferences = DuoPreferences.shared
     private lazy var lidController = LidController(preferences: duoPreferences)
+    private let blinkManager = BlinkManager.shared
+
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private let extendItem = NSMenuItem(title: "Extend", action: #selector(toggleDisplay), keyEquivalent: "d")
     private let duoItem = NSMenuItem(title: "Duo", action: #selector(toggleDuoEffect), keyEquivalent: "")
+    private let brightnessItem = NSMenuItem(title: "Brightness", action: #selector(toggleBrightness), keyEquivalent: "b")
+    private let blinkItem = NSMenuItem(title: "Blink", action: #selector(toggleBlink), keyEquivalent: "")
     private let exitItem = NSMenuItem(title: "Exit", action: #selector(quitApp), keyEquivalent: "q")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        ProcessInfo.processInfo.disableAutomaticTermination("正在监测外接显示器与开合传感器")
+        ProcessInfo.processInfo.disableAutomaticTermination("正在监测外接显示器、传感器与任务状态")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureStatusItem()
         lidController.start()
         rebuildMenu()
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(rebuildMenuNotification),
             name: .displayManagerDidUpdate,
             object: displayManager
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(rebuildMenuNotification),
+            name: .blinkStateDidUpdate,
+            object: nil
+        )
+
+        handleCommandLineArguments()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // 退出也走同一个串行事务，避免后台正在关屏时进程先退出。
+        blinkManager.stopMonitoring()
+        BrightnessPanelWindow.shared.hide()
         DispatchQueue.main.async { [weak self] in
             self?.displayManager.prepareForTermination { success in
                 sender.reply(toApplicationShouldTerminate: success)
@@ -38,8 +52,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        blinkManager.stopMonitoring()
+        BrightnessPanelWindow.shared.hide()
         lidController.stop()
         NotificationCenter.default.removeObserver(self)
+    }
+
+    private func handleCommandLineArguments() {
+        let args = CommandLine.arguments
+        if args.contains("--blink-test") {
+            blinkManager.startSimulation(duration: 5.0)
+        } else if args.contains("--brightness") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.toggleBrightness()
+            }
+        }
     }
 
     @objc private func rebuildMenuNotification() {
@@ -60,6 +87,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 CGRequestScreenCaptureAccess()
             }
         }
+        rebuildMenu()
+    }
+
+    @objc private func toggleBrightness() {
+        menu.cancelTracking()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, let button = self.statusItem.button else { return }
+            BrightnessPanelWindow.shared.toggle(relativeTo: button)
+        }
+    }
+
+    @objc private func toggleBlink() {
+        blinkManager.toggle()
         rebuildMenu()
     }
 
@@ -86,10 +126,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         if menu.items.isEmpty {
             menu.autoenablesItems = false
-            for item in [extendItem, duoItem, exitItem] { item.target = self }
+            for item in [extendItem, duoItem, brightnessItem, blinkItem, exitItem] {
+                item.target = self
+            }
             menu.addItem(extendItem)
             menu.addItem(.separator())
             menu.addItem(duoItem)
+            menu.addItem(.separator())
+            menu.addItem(brightnessItem)
+            menu.addItem(blinkItem)
             menu.addItem(.separator())
             menu.addItem(exitItem)
             statusItem.menu = menu
@@ -101,10 +146,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         extendItem.isEnabled = !busy && !displayManager.isPreparingToQuit && (displayManager.isInternalDisplayOff
             ? displayManager.internalDisplayID != nil
             : displayManager.externalDisplayCount > 0)
-        statusItem.button?.toolTip = busy ? "MaskMac — 正在切换显示器" : "MaskMac"
+
         duoItem.state = duoPreferences.isEnabled ? .on : .off
         duoItem.isEnabled = lidController.isSensorAvailable
         duoItem.title = lidController.isSensorAvailable ? "Duo" : "Duo (No Sensor)"
+
+        blinkItem.state = blinkManager.isEnabled ? .on : .off
+        if let agent = blinkManager.currentAgent {
+            blinkItem.title = "Blink (\(agent))"
+        } else {
+            blinkItem.title = "Blink"
+        }
+
+        if busy {
+            statusItem.button?.toolTip = "MaskMac — 正在切换显示器"
+        } else if blinkManager.isBlinking {
+            statusItem.button?.toolTip = "MaskMac — \(blinkManager.currentAgent ?? "Agent") 运行中 (中/英灯闪烁)"
+        } else {
+            statusItem.button?.toolTip = "MaskMac"
+        }
+
         exitItem.isEnabled = !displayManager.isPreparingToQuit
     }
 }
