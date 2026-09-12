@@ -28,7 +28,10 @@ final class ScreenAuraWindow: NSPanel {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         self.setFrame(screen.frame, display: true)
 
-        self.alphaValue = 0
+        if self.isVisible && self.alphaValue >= 0.99 {
+            return
+        }
+
         self.orderFront(nil)
 
         // 像呼吸一样自然柔和地点亮
@@ -40,7 +43,7 @@ final class ScreenAuraWindow: NSPanel {
     }
 
     func hide() {
-        guard self.isVisible else { return }
+        guard self.isVisible, self.alphaValue > 0 else { return }
         // 任务完成后柔和暗下并彻底消失
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.5
@@ -48,7 +51,8 @@ final class ScreenAuraWindow: NSPanel {
             self.animator().alphaValue = 0.0
         }, completionHandler: { [weak self] in
             DispatchQueue.main.async {
-                self?.orderOut(nil)
+                guard let self, self.alphaValue == 0 else { return }
+                self.orderOut(nil)
             }
         })
     }
