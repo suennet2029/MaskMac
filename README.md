@@ -9,14 +9,12 @@
 1. **Extend**: Turn off your MacBook's built-in display without closing the lid when connected to external monitors.
 2. **Duo**: Frosted glass transition effect mimicking dual-screen folding devices when adjusting the MacBook lid.
 3. **Brightness**: Compact frosted HUD popup to smoothly adjust display brightness and MacBook native keyboard backlight with sliders (dismisses immediately upon clicking anywhere outside).
-4. **Aura**: Automatically senses local tasks from **Claude Code**, **CodeX**, and **antiGravity**, flowing a vibrant **Apple Intelligence style full-screen edge shimmering aura** with breathing pulses around the display perimeter and gentle keyboard backlight breathing, fading away cleanly when complete with zero keystroke conflicts.
 
 ### 🌟 Highlights
 
 * 🔥 **Protect Display from Heat Damage**: Running high workloads in Clamshell Mode traps heat between the keyboard and screen. Keeping the lid open provides superior thermal dissipation and preserves screen coating.
 * ⌨️ **Keep Keyboard & Touch ID**: Continue using built-in keyboard, trackpad, and Touch ID without external peripherals.
 * ☀️ **Quick Brightness Controls (Brightness)**: Click `Brightness` in the menu bar to adjust screen and keyboard backlight brightness directly via smooth sliders. Automatically dismisses on outside clicks.
-* 🌈 **Apple Intelligence Shimmering Aura (Aura)**: Automatically detects active Claude Code, CodeX, or antiGravity sessions, displaying an organic, gently shimmering full-screen border aura alongside keyboard breathing.
 * 🛡️ **Failsafe Protection**: Built-in screen automatically turns back on if external monitors are disconnected or when quitting the app.
 
 ### ⌨️ Menu & Shortcuts
@@ -26,7 +24,6 @@
 | **Extend** | `⌘ D` | Toggle built-in display on / off (external display only) |
 | **Duo** | — | Toggle lid angle sensor frosted transition effect |
 | **Brightness** | `⌘ B` | Open compact HUD to adjust screen & keyboard brightness (dismisses on outside click) |
-| **Aura** | — | Toggle AI task indicator (Full-screen Apple Intelligence shimmering aura + keyboard breathing) |
 | **Exit** | `⌘ Q` | Terminate app (automatically restores screen by default) |
 
 ### 🚀 Installation & Build
